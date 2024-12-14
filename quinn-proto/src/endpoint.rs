@@ -143,12 +143,13 @@ impl Endpoint {
         remote: SocketAddr,
         local_ip: Option<IpAddr>,
         ecn: Option<EcnCodepoint>,
-        data: BytesMut,
+        data: & [u8],
         buf: &mut Vec<u8>,
     ) -> Option<DatagramEvent> {
         let datagram_len = data.len();
+
         let (first_decode, remaining) = match PartialDecode::new(
-            data,
+            BytesMut::from(data),
             &FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
             &self.config.supported_versions,
             self.config.grease_quic_bit,

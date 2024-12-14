@@ -18,7 +18,7 @@ use crate::{
     runtime::{AsyncUdpSocket, Runtime},
     udp_transmit,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use pin_project_lite::pin_project;
 use proto::{
     self as proto, ClientConfig, ConnectError, ConnectionError, ConnectionHandle, DatagramEvent,
@@ -734,12 +734,6 @@ struct RecvState {
     connections: ConnectionSet,
     recv_buf: Box<[u8]>,
     recv_limiter: WorkLimiter,
-    
-    // Reusable buffer for incoming packets to avoid frequent allocations.
-    // Size is set to 1300 bytes considering QUIC's default MTU (1200 bytes) plus some headroom.
-    // This buffer is reused across multiple packet processing cycles, significantly reducing
-    // heap allocations under high packet rates.
-    reusable_buffer: BytesMut,
 }
 
 impl RecvState {
@@ -763,7 +757,6 @@ impl RecvState {
             incoming: VecDeque::new(),
             recv_buf: recv_buf.into(),
             recv_limiter: WorkLimiter::new(RECV_TIME_BOUND),
-            reusable_buffer: BytesMut::with_capacity(1300),
         }
     }
 
@@ -791,20 +784,20 @@ impl RecvState {
                 Poll::Ready(Ok(msgs)) => {
                     self.recv_limiter.record_work(msgs);
                     for (meta, buf) in metas.iter().zip(iovs.iter()).take(msgs) {
-                        // Clear the reusable buffer but keep its allocated capacity
-                        self.reusable_buffer.clear();
-                        // Copy new data into the reused buffer
-                        self.reusable_buffer.extend_from_slice(&buf[0..meta.len]);
+                        let data = &buf[..meta.len];
+                        let mut offset = 0;
                         
-                        while !self.reusable_buffer.is_empty() {
-                            let buf = self.reusable_buffer.split_to(meta.stride.min(self.reusable_buffer.len()));
+                        while offset < data.len() {
+                            let chunk_size = meta.stride.min(data.len() - offset);
+                            let chunk = &data[offset..offset + chunk_size];
+                            
                             let mut response_buffer = Vec::new();
                             match endpoint.handle(
                                 now,
                                 meta.addr,
                                 meta.dst_ip,
                                 meta.ecn.map(proto_ecn),
-                                buf,
+                                chunk,
                                 &mut response_buffer,
                             ) {
                                 Some(DatagramEvent::NewConnection(incoming)) => {
@@ -829,6 +822,8 @@ impl RecvState {
                                 }
                                 None => {}
                             }
+                            
+                            offset += chunk_size;
                         }
                     }
                 }
